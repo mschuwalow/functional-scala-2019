@@ -1,6 +1,7 @@
 slidenumbers: true
 
 # Macros and __functional effects__
+[.slidenumbers: false]
 --
 --
 --
@@ -116,17 +117,15 @@ def handleJoin[T](
 ): ZIO[Console with Env[T] with Transport[T], Error, Unit] =
   Env.using[T] { env =>
     for {
-      others <- env.activeView.keys.map(_.filterNot(_ == msg.sender)).commit
+      others <- env.activeView.keys
+                  .map(_.filterNot(_ == msg.sender)).commit
       _      <- ZIO.foreachPar_(others) { node =>
                   send(
                     node,
                     ForwardJoin(
-                      env.myself,
-                      msg.sender,
+                      env.myself, msg.sender,
                       TimeToLive(env.cfg.arwl)
-                    )
-                  ).ignore
-                }
+                    )).ignore }
       _      <- addConnection(msg.sender, con)
     } yield ()
   }
@@ -186,26 +185,22 @@ object UserRepository {
 
 ---
 ```scala
-  def doobieUserRepository(cfg: DBConfig): ZManaged[Blocking, Throwable, UserRepository.Service] = {
-    val initDb: Task[Unit] =
-      Task {
-        Flyway.configure().dataSource(cfg.url, cfg.user, cfg.password).load().migrate()
-      }.unit
-
-    val mkTransactor: ZManaged[Blocking, Throwable, HikariTransactor[Task]] =
-      ZIO.runtime[Blocking].toManaged_.flatMap { implicit rt =>
-        for {
-          transactEC <- rt.Environment.blocking.blockingExecutor.map(_.asEC).toManaged_
-          connectEC = rt.Platform.executor.asEC
-          transactor <- HikariTransactor
-                         .newHikariTransactor[Task](
-                           cfg.driver, cfg.url, cfg.user,
-                           cfg.password, connectEC, Blocker.liftExecutionContext(transactEC)
-                         ).toManaged
-        } yield transactor
-      }
-    initDb.toManaged_ *> mkTransactor.map(new DoobieUserRepository(_))
-  }
+  def doobieUserRepository(
+    cfg: DBConfig
+  ): ZManaged[Blocking, Throwable, UserRepository] =
+    ZIO.runtime[Blocking].toManaged_.flatMap { implicit rt =>
+      for {
+        transactEC <- rt.Environment.blocking.blockingExecutor
+                        .map(_.asEC).toManaged_
+        connectEC   = rt.Platform.executor.asEC
+        transactor <- HikariTransactor
+                        .newHikariTransactor[Task](
+                          cfg.driver, cfg.url, cfg.user,
+                          cfg.password, connectEC,
+                          Blocker.liftExecutionContext(transactEC)
+                        ).toManaged
+      } yield new DoobieUserRepository(transactor)
+    }
 ```
 
 ---
@@ -216,9 +211,9 @@ val dbConfig: DBConfig = ???
 def main(args: List[String]) = {
   for {
     baseEnv               <- ZIO.environment[ZEnv]
-    userRepositoryService <- doobieUserRepository(dbConfig).provide(env)
+    userRepository0       <- doobieUserRepository(dbConfig).provide(env)
     env = new UserRepository with Blocking with Console {
-      val userRepository  = userRepositoryService
+      val userRepository  = userRepository0.userRepository
       val blocking        = env.blocking
       val console         = env.console
     }
@@ -237,31 +232,16 @@ def main(args: List[String]) = {
 ```scala
 final def delayedMEnv[R1 <: Clock](
   f: Duration => ZIO[R1, Nothing, Duration],
-  g: (Clock.Service[Any] => Clock.Service[Any]) => R1 => R // <- modify environment
-): Schedule[R1, A, B] = {
-  def proxy(clock0: Clock.Service[Any], env: R1): Clock.Service[Any] = ???
-  new Schedule[R1, A, B] {
-    type State = (self.State, R)
-    val initial =
-      for {
-        oldEnv <- ZIO.environment[R1]
-        env    =  g(proxy(_, oldEnv))(oldEnv) // <- compose environments
-        init   <- self.initial.provide(env)
-      } yield (init, env)
-    val extract = (a: A, s: State) =>
-      self.extract(a, s._1)
-    val update  = (a: A, s: State) =>
-      self.update(a, s._1).provide(s._2).map((_, s._2))
-  }
-}
+  g: (Clock.Service[Any] => Clock.Service[Any]) => R1 => R
+): Schedule[R1, A, B] = ???
 ```
 
 ---
 ## Requirements
-1. Combinations of _R_ are fully inferred ![fit](./images/noun_tick_2836262.pdf)
-2. Use larger _R_ insted of smaller _R_ ![fit](./images/noun_tick_2836262.pdf)
-3. (Effectfully) add member to _R_ ![fit](./images/noun_Cross_1121797.pdf)
-4. (Effectfully) replace member in _R_ ![fit](./images/noun_Cross_1121797.pdf)
+1. Combinations of _R_ are fully inferred   ![fit](./images/noun_tick_2836262.pdf)
+2. Use larger _R_ instead of smaller _R_    ![fit](./images/noun_tick_2836262.pdf)
+3. (Effectfully) remove member to _R_       ![fit](./images/noun_Cross_1121797.pdf)
+4. (Effectfully) replace member in _R_      ![fit](./images/noun_Cross_1121797.pdf)
 
 ---
 ## Introducing zio-macros
@@ -276,27 +256,24 @@ libraryDependencies += ("dev.zio" %% "zio-macros-core" % "0.6.0")
 ### (A, B) => A __with__ B
 
 ---
-## Mix[A, B]
+## Mix[__A__, __B__]
 
 ```scala
 trait Mix[A, B] {
 
   def mix(a: A, b: B): A with B
-
 }
 
 object Mix {
 
   def apply[A, B](implicit ev: Mix[A, B]) = ev
 
-  implicit def deriveMix[A, B]: Mix[A, B] = macro Macros.mixImpl[A, B]
-
+  implicit def deriveMix[A, B]: Mix[A, B] =
+    macro Macros.mixImpl[A, B]
 }
 ```
 
 ---
-## Mix[A, B]
-
 ```scala
 class Foo {
   def foo: Int = 2
@@ -306,9 +283,8 @@ trait Bar {
   def bar: Int
 }
 
-def withBar[A](a: A)(implicit ev: Mix[A, Bar]): A with Bar = {
+def withBar[A](a: A)(implicit ev: Mix[A, Bar]): A with Bar =
   ev.mix(a, new Bar { def bar = 2 })
-}
 
 withBar(new Foo()).bar // 2
 ```
@@ -329,37 +305,42 @@ def enrichWithManaged[A]: EnrichWithManaged.PartiallyApplied[A] =
 
 ---
 ```scala
-final class EnrichWithM[-R, +E, B](private[this] val zio: ZIO[R, E, B]) {
-
-  def apply[A](a: A)(implicit ev: A Mix B): ZIO[R, E, A with B] =
-    zio.map(ev.mix(a, _))
+final class EnrichWithM[-R, +E, B](val zio: ZIO[R, E, B]) {
+  ???
 
   def enrichZIO[R1, E1 >: E, A <: R](
     that: ZIO[R1, E1, A]
   )(implicit ev: A Mix B): ZIO[R1, E1, A with B] =
     that.flatMap(r1 => zio.provide(r1).map(ev.mix(r1, _)))
-
-  def enrichZManaged[R1, E1 >: E, A <: R](
-    that: ZManaged[R1, E1, A]
-  )(implicit ev: A Mix B): ZManaged[R1, E1, A with B] =
-    that.flatMap(r1 => zio.provide(r1).map(ev.mix(r1, _)).toManaged_)
 }
 
 object EnrichWithM {
   final class PartiallyApplied[A] {
-    def apply[R, E](zio: ZIO[R, E, A]): EnrichWithM[R, E, A] = new EnrichWithM(zio)
+    def apply[R, E](zio: ZIO[R, E, A]): EnrichWithM[R, E, A] =
+      new EnrichWithM(zio)
   }
 }
 ```
 
 ---
 ```scala
-val enrichClock        = enrichWith[Clock](Clock.Live)
-val enrichClockM       = enrichWithM[Clock](ZIO.succeed(Clock.Live))
-val enrichClockManaged = enrichWithManaged[Clock](ZManaged.succeed(Clock.Live))
+val enrichClock =
+  enrichWith[Clock](Clock.Live)
 
-val blockingWithDeps: ZIO[Console, Throwable, Blocking] = ZIO.succeed(Blocking.Live)
-val enrichBlockingMWithDeps = enrichWithM[Blocking](blockingWithDeps)
+val enrichClockM =
+  enrichWithM[Clock](ZIO.succeed(Clock.Live))
+
+val enrichClockManaged =
+  enrichWithManaged[Clock](ZManaged.succeed(Clock.Live))
+```
+
+---
+```scala
+val blockingWithDeps: ZIO[Console, Throwable, Blocking] =
+  ZIO.succeed(Blocking.Live)
+
+val enrichBlockingMWithDeps =
+  enrichWithM[Blocking](blockingWithDeps)
 ```
 
 
@@ -367,27 +348,25 @@ val enrichBlockingMWithDeps = enrichWithM[Blocking](blockingWithDeps)
 ```scala
 implicit class ZIOOps[R, E, A](zio: ZIO[R, E, A]) {
 
-  def @@[B](enrichWith: EnrichWith[B])(implicit ev: A Mix B): ZIO[R, E, A with B] =
+  def @@[B](
+    enrichWith: EnrichWith[B]
+  )(implicit ev: A Mix B): ZIO[R, E, A with B] =
     enrichWith.enrichZIO[R, E, A](zio)
 
-  def @@[B](enrichWithM: EnrichWithM[A, E, B])(implicit ev: A Mix B): ZIO[R, E, A with B] =
-    enrichWithM.enrichZIO[R, E, A](zio)
-
-  def @@[B](enrichWithManaged: EnrichWithManaged[A, E, B])(implicit ev: A Mix B): ZManaged[R, E, A with B] =
-    enrichWithManaged.enrichZManaged[R, E, A](zio.toManaged_)
 }
 ```
 
 ---
 ```scala
-val enrichClock        = enrichWith[Clock](Clock.Live)
-val enrichClockM       = enrichWithM[Clock](ZIO.succeed(Clock.Live))
-val enrichClockManaged = enrichWithManaged[Clock](ZManaged.succeed(Clock.Live))
+val enrichClock = enrichWith[Clock](Clock.Live)
 
-val blockingWithDeps: ZIO[Console, Throwable, Blocking] = ZIO.succeed(Blocking.Live)
-val enrichBlockingMWithDeps = enrichWithM[Blocking](blockingWithDeps)
+val blockingWithDeps: ZIO[Console, Throwable, Blocking] =
+  ZIO.succeed(Blocking.Live)
 
-//==================================================================================
+val enrichBlockingMWithDeps =
+  enrichWithM[Blocking](blockingWithDeps)
+
+//=====================================================================
 
 val randomWithClock: ZIO[Any, Nothing, Random with Clock] =
   ZIO.succeed(Random.Live) @@ enrichClock
@@ -404,7 +383,9 @@ val consoleWithBlocking: ZIO[Console, Nothing, Console with Blocking] =
 ## Patch
 
 ```scala
-def patch[A, B](implicit ev: A Mix B): (B => B) => A with B => A with B =
+def patch[A, B](
+  implicit ev: A Mix B
+): (B => B) => A with B => A with B =
   f => old => ev.mix(old, f(old))
 ```
 
@@ -412,13 +393,17 @@ def patch[A, B](implicit ev: A Mix B): (B => B) => A with B => A with B =
 ## Patch
 
 ```scala
-def patch[A, B](implicit ev: A Mix B): (B => B) => A with B => A with B =
+def patch[A, B](
+  implicit ev: A Mix B
+): (B => B) => A with B => A with B =
   f => old => ev.mix(old, f(old))
 
 val mapClock: (Clock.Service[Any] => Clock.Service[Any]) => ZEnv => ZEnv =
   f => patch[ZEnv, Clock].apply(c => new Clock { val clock = f(c.clock) })
 
-def disableLogging[R <: ZLogger: Mix[?, ZLogger], E, A](zio: ZIO[R, E, A]): ZIO[R, E, A] =
+def disableLogging[R <: ZLogger: Mix[?, ZLogger], E, A](
+  zio: ZIO[R, E, A]
+): ZIO[R, E, A] =
   ZIO.provideSome[R](env => patch[R, ZLogger](_ => NoOpLogger)(env))
 ```
 
