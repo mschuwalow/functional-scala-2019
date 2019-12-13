@@ -32,6 +32,9 @@ Functional Scala, 13.12.2019
 ![fit, original](images/monads-3.pdf)
 
 ---
+##ZIO[__R__, __E__, __A__]
+
+---
 ## Module Pattern
 
 ---
@@ -161,6 +164,9 @@ def withFreshEnv[R <: BaseEnv, E, A](
 ```
 
 ---
+# ![100%](images/grumpy.jpg)
+
+---
 ## Application _#2_
 --
 --
@@ -230,18 +236,22 @@ def main(args: List[String]) = {
 
 ---
 ```scala
-final def delayedMEnv[R1 <: Clock](
-  f: Duration => ZIO[R1, Nothing, Duration],
-  g: (Clock.Service[Any] => Clock.Service[Any]) => R1 => R
-): Schedule[R1, A, B] = ???
+trait Schedule[-R, -A, +B] {
+
+  final def delayedMEnv[R1 <: Clock](
+    f: Duration => ZIO[R1, Nothing, Duration],
+    g: (Clock.Service[Any] => Clock.Service[Any]) => R1 => R
+  ): Schedule[R1, A, B] = ???
+
+}
 ```
 
 ---
 ## Requirements
 1. Combinations of _R_ are fully inferred   ![fit](./images/noun_tick_2836262.pdf)
 2. Use larger _R_ instead of smaller _R_    ![fit](./images/noun_tick_2836262.pdf)
-3. (Effectfully) remove member to _R_       ![fit](./images/noun_Cross_1121797.pdf)
-4. (Effectfully) replace member in _R_      ![fit](./images/noun_Cross_1121797.pdf)
+3. (Effectfully) add members to _R_         ![fit](./images/noun_Cross_1121797.pdf)
+4. (Effectfully) replace members in _R_     ![fit](./images/noun_Cross_1121797.pdf)
 
 ---
 ## Introducing zio-macros
@@ -373,6 +383,20 @@ val randomWithClock: ZIO[Any, Nothing, Random with Clock] =
 
 val consoleWithBlocking: ZIO[Console, Nothing, Console with Blocking] =
   ZIO.environment[Console] @@ enrichBlockingMWithDeps
+```
+
+---
+```scala
+object Main extends zio.ManagedApp {
+
+  def main(args: List[String]) =
+    ZIO.environment[ZEnv]                  @@
+    withSlf4jLogger                        @@
+    withDoobieTodoRepository(cfg.dbConfig) @@
+    withDefaultTracing                     >>>
+    runHttp(httpApp, cfg.appConfig.port).toManaged_
+
+}
 ```
 
 ---
